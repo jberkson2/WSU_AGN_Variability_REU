@@ -1,0 +1,290 @@
+#ZTF Palette, Font, Plotting Functions
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Wong (2011) colorblind-safe palette
+# Source: Wong, B. (2011) Nature Methods 8, 441. https://doi.org/10.1038/nmeth.1618
+WONG_PALETTE = {
+    "black":          "#000000",
+    "orange":         "#E69F00",
+    "sky_blue":       "#56B4E9",
+    "bluish_green":   "#009E73",
+    "yellow":         "#F0E442",
+    "blue":           "#0072B2",
+    "vermillion":     "#D55E00",
+    "reddish_purple": "#CC79A7",
+}
+
+# Band defaults using the Wong palette.
+# g ≈ bluish green  |  r ≈ vermillion  |  i ≈ blue  |  z ≈ reddish purple
+_BAND_DEFAULTS = {
+    "g": {"color": WONG_PALETTE["bluish_green"],   "marker": "o"},
+    "r": {"color": WONG_PALETTE["vermillion"],     "marker": "s"},
+    "i": {"color": WONG_PALETTE["blue"],           "marker": "^"},
+    "z": {"color": WONG_PALETTE["reddish_purple"], "marker": "D"},
+}
+
+def _configure_font():
+    """
+    Set Avenir as the global matplotlib font family.
+    Falls back to the next available sans-serif if Avenir is not installed
+    (e.g. on Linux/Windows), so the code remains portable.
+    """
+    import matplotlib.font_manager as fm
+
+    available = {f.name for f in fm.fontManager.ttflist}
+    if "Avenir" in available:
+        plt.rcParams["font.family"] = "Avenir"
+    else:
+        # Common cross-platform alternatives in preference order
+        fallbacks = ["Gill Sans", "Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"]
+        chosen = next((f for f in fallbacks if f in available), "sans-serif")
+        plt.rcParams["font.family"] = chosen
+        print(f"[Font] Avenir not found — using '{chosen}' instead.")
+
+_configure_font()  # Apply once at import time
+
+def plot_light_curve(
+    data,
+    galaxy_id=None,
+    figsize=(11, 5),
+    band_styles=None,
+    ylabel="Magnitude",
+    title=None,
+    invert_yaxis=True,
+    show_grid=True,
+    save_path=None,
+):
+    """
+    Plot ZTF light curves for one or more bands on a single axes.
+
+    The x-axis always shows offset MJD: the global minimum MJD across all
+    loaded bands is floored to an integer, subtracted from every MJD value,
+    and written into the axis label as "MJD − <offset>" so the tick numbers
+    stay small and readable.
+
+    Parameters
+    ----------
+    data : dict
+        Mapping of band letter -> data dict, as returned by load_ztf_galaxy
+        or a dict containing a single entry from load_ztf_band.
+    galaxy_id : str, optional
+        Used in the figure title.  Inferred from the data dicts if omitted.
+    figsize : (float, float)
+        Matplotlib figure size in inches.
+    band_styles : dict, optional
+        Override per-band plot style.  Keys are band letters; values are
+        dicts with any subset of {'color', 'marker'}.
+        Example: band_styles={'g': {'color': WONG_PALETTE['blue']}}
+    ylabel : str
+        Y-axis label (default 'Magnitude').
+    title : str, optional
+        Custom figure title.  Defaults to "ZTF Light Curve — <galaxy_id>".
+    invert_yaxis : bool
+        If True (default), inverts the y-axis so brighter magnitudes appear
+        higher, following standard astronomical convention.
+    show_grid : bool
+        If True (default), draws a light background grid.
+    save_path : str, optional
+        If provided, saves the figure to this path (format inferred from
+        the extension, e.g. '.png', '.pdf').
+
+    Returns
+    -------
+    fig, ax : matplotlib Figure and Axes objects for further customisation.
+    """
+    # Allow passing a single-band dict directly
+    if "MJD" in data:
+        band_key = data.get("band", "?")
+        data = {band_key: data}
+
+    # Merge default styles with any caller overrides
+    styles = {b: dict(v) for b, v in _BAND_DEFAULTS.items()}
+    if band_styles:
+        for b, overrides in band_styles.items():
+            styles.setdefault(b, {}).update(overrides)
+
+    # Infer galaxy ID from data if not supplied
+    if galaxy_id is None:
+        galaxy_id = next(iter(data.values())).get("galaxy_id", "Unknown")
+
+    # Compute MJD offset: floor of the global minimum MJD across all bands.
+    # Flooring to an integer keeps the label clean (e.g. "MJD − 58202").
+    global_min_mjd = min(bdata["MJD"].min() for bdata in data.values())
+    mjd_offset = int(np.floor(global_min_mjd))
+    xlabel = f"MJD \u2212 {mjd_offset}"   # unicode minus sign for cleaner rendering
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    for band, bdata in data.items():
+        style = styles.get(band, {"color": WONG_PALETTE["sky_blue"], "marker": "o"})
+        ax.errorbar(
+            bdata["MJD"] - mjd_offset,       # apply the offset here, not to stored data
+            bdata["mag"],
+            yerr=bdata["mag_err"],
+            fmt=style["marker"],
+            color=style["color"],
+            markersize=4,
+            elinewidth=0.8,
+            capsize=2,
+            alpha=0.85,
+            label=f"ZTF {band}-band",
+        )
+
+    ax.set_xlabel(xlabel, fontsize=12)
+    ax.set_ylabel(ylabel, fontsize=12)
+
+    if invert_yaxis:
+        ax.invert_yaxis()
+
+    ax.set_title(title or f"ZTF Light Curve — {galaxy_id}", fontsize=13)
+    ax.legend(fontsize=11)
+
+    if show_grid:
+        ax.grid(True, alpha=0.3, linestyle="--")
+
+    # Compute y-axis limits from all magnitudes combined
+    all_mags = np.concatenate([
+        bdata["mag"] for bdata in data.values()
+    ])
+
+    mean_mag = np.mean(all_mags)
+    std_mag = np.std(all_mags)
+
+    if invert_yaxis:
+        ax.set_ylim(mean_mag + 3 * std_mag,
+                    mean_mag - 3 * std_mag)
+    else:
+        ax.set_ylim(mean_mag - 3 * std_mag,
+                    mean_mag + 3 * std_mag)
+
+    fig.tight_layout()
+
+    return fig, ax
+
+def load_ztf_band(filepath):
+    """
+    Load a single ZTF light curve file into a structured dictionary.
+
+    Parameters
+    ----------
+    filepath : str
+        Full path to a ZTF .txt file.
+
+    Returns
+    -------
+    dict with keys:
+        'galaxy_id' : str   – parsed from filename up to the first underscore
+        'band'      : str   – parsed from filename (e.g. 'g', 'r')
+        'MJD'       : np.ndarray
+        'mag'       : np.ndarray
+        'mag_err'   : np.ndarray
+        'df'        : pd.DataFrame  – raw dataframe for any further inspection
+
+    Raises
+    ------
+    FileNotFoundError if the file does not exist.
+    ValueError if the file has fewer than 3 columns.
+    """
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"ZTF file not found: {filepath}")
+
+    # sep handles optional whitespace around the commas in the file
+    df = pd.read_csv(filepath, sep=r"\s*,\s*", engine="python")
+    df.columns = df.columns.str.strip()
+
+    if df.shape[1] < 3:
+        raise ValueError(
+            f"Expected at least 3 columns (MJD, mag, mag_err) in {filepath}, "
+            f"found {df.shape[1]}."
+        )
+
+    # Parse galaxy ID and band from the filename
+    filename  = os.path.basename(filepath)
+    stem      = os.path.splitext(filename)[0]          # e.g. NSA10045_ztf_g
+    parts     = stem.split("_")
+    galaxy_id = parts[0]                               # e.g. NSA10045
+    band      = parts[-1]                              # e.g. g  or  r
+
+    return {
+        "galaxy_id": galaxy_id,
+        "band":      band,
+        "MJD":       df.iloc[:, 0].to_numpy(dtype=float),
+        "mag":       df.iloc[:, 1].to_numpy(dtype=float),
+        "mag_err":   df.iloc[:, 2].to_numpy(dtype=float),
+        "df":        df,
+    }
+
+def load_ztf_galaxy(base_dir, galaxy_id, bands=("g", "r")):
+    """
+    Load all requested ZTF band files for a single galaxy.
+
+    Parameters
+    ----------
+    base_dir  : str
+        Directory that contains the ZTF .txt files.
+    galaxy_id : str
+        Galaxy identifier prefix used in the filenames (e.g. 'NSA10045').
+    bands     : sequence of str
+        Band letters to load, e.g. ('g', 'r') or ('g', 'r', 'i').
+
+    Returns
+    -------
+    dict mapping each band letter -> data dict (as returned by load_ztf_band).
+
+    Notes
+    -----
+    ZTF routinely observes different bands at different times, so MJD arrays
+    will often differ between bands.  A warning is printed when they do not
+    match, but both bands are still returned so they can be plotted together.
+    """
+    data = {}
+    for band in bands:
+        filename = f"{galaxy_id}_ztf_{band}.txt"
+        filepath = os.path.join(base_dir, filename)
+        data[band] = load_ztf_band(filepath)
+
+    # Check whether all loaded bands share the same MJD grid
+    _check_mjd_consistency(data)
+
+    return data
+
+
+def _check_mjd_consistency(data):
+    """
+    Internal helper: warn if MJD arrays differ across bands.
+
+    ZTF multi-band MJDs usually do NOT match — that is normal and expected.
+    We print an informational message rather than raising an error so that
+    plotting can still proceed.
+    """
+    band_list = list(data.keys())
+    if len(band_list) < 2:
+        return  # Nothing to compare
+
+    ref_band = band_list[0]
+    ref_mjd  = data[ref_band]["MJD"]
+
+    all_match = True
+    for band in band_list[1:]:
+        other_mjd = data[band]["MJD"]
+        same = (
+            len(ref_mjd) == len(other_mjd)
+            and np.allclose(ref_mjd, other_mjd)
+        )
+        if not same:
+            all_match = False
+            print(
+                f"[Info] MJD values differ between bands '{ref_band}' and '{band}' "
+                f"({len(ref_mjd)} vs {len(other_mjd)} epochs). "
+                "This is normal for ZTF — each band will be plotted independently."
+            )
+
+    if all_match:
+        print(
+            f"[Info] MJD arrays are identical across all bands "
+            f"({len(ref_mjd)} epochs)."
+        )
