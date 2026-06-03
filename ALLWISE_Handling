@@ -1,0 +1,780 @@
+# ALLWISE data loading, quality filtering, and light-curve plotting.
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ---------------------------------------------------------------------------
+# Wong (2011) colour-blind-safe palette and font configuration.
+# Re-uses the ZTF module's definitions when available so that optical and
+# infrared plots share a consistent visual language.
+# ---------------------------------------------------------------------------
+try:
+    from ztf_light_curves import WONG_PALETTE, _configure_font
+    _configure_font()
+except ImportError:
+    WONG_PALETTE = {
+        "black":          "#000000",
+        "orange":         "#E69F00",
+        "sky_blue":       "#56B4E9",
+        "bluish_green":   "#009E73",
+        "yellow":         "#F0E442",
+        "blue":           "#0072B2",
+        "vermillion":     "#D55E00",
+        "reddish_purple": "#CC79A7",
+    }
+    import matplotlib.font_manager as fm
+    _available_fonts = {f.name for f in fm.fontManager.ttflist}
+    if "Avenir" in _available_fonts:
+        plt.rcParams["font.family"] = "Avenir"
+    else:
+        _fallbacks = ["Gill Sans", "Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"]
+        _chosen = next((f for f in _fallbacks if f in _available_fonts), "sans-serif")
+        plt.rcParams["font.family"] = _chosen
+        print(f"[Font] Avenir not found — using '{_chosen}' instead.")
+
+# ---------------------------------------------------------------------------
+# Band colour/marker defaults.
+# W1 (3.4 µm) → orange  |  W2 (4.6 µm) → sky blue
+# W1–W2 colour index    → bluish green
+# ---------------------------------------------------------------------------
+_ALLWISE_BAND_DEFAULTS = {
+    "W1":    {"color": WONG_PALETTE["orange"],       "marker": "o"},
+    "W2":    {"color": WONG_PALETTE["sky_blue"],     "marker": "s"},
+    "W1-W2": {"color": WONG_PALETTE["bluish_green"], "marker": "s"},
+}
+
+
+# =============================================================================
+# Data loading
+# =============================================================================
+
+def load_ALLWISE_band(filepath):
+    """
+    Load a single ALLWISE light curve file into a structured dictionary.
+
+    Both W1 and W2 are recorded simultaneously at each epoch, so a single
+    call returns data for both infrared bands at once.
+
+    Parameters
+    ----------
+    filepath : str
+        Full path to an ALLWISE .csv file.
+
+    Returns
+    -------
+    dict with keys
+    --------------
+    'galaxy_id'       : str
+    'survey'          : str  – always 'allwise'
+    'source_id_mf'    : str  – unique WISE source identifier
+    'ra'              : float
+    'dec'             : float
+    'MJD'             : np.ndarray
+    'w1mpro_ep'       : np.ndarray  – W1 profile-fit magnitude
+    'w1sigmpro_ep'    : np.ndarray  – W1 uncertainty (1σ)
+    'w1rchi2_ep'      : np.ndarray  – W1 reduced chi-squared
+    'w2mpro_ep'       : np.ndarray  – W2 profile-fit magnitude
+    'w2sigmpro_ep'    : np.ndarray  – W2 uncertainty (1σ)
+    'w2rchi2_ep'      : np.ndarray  – W2 reduced chi-squared
+    'nb'              : np.ndarray  – number of PSF components (cut: nb == 1)
+    'na'              : np.ndarray  – number of deblended sources (cut: na == 0)
+    'moon_masked'     : np.ndarray  – moon-masking flag (cut: == 0)
+    'qi_fact'         : np.ndarray  – quality factor (cut: > 0)
+    'saa_sep'         : np.ndarray  – SAA separation in degrees (cut: >= 5)
+    'df'              : pd.DataFrame
+
+    Raises
+    ------
+    FileNotFoundError, ValueError
+    """
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"ALLWISE file not found: {filepath}")
+
+    df = pd.read_csv(filepath)
+    df.columns = df.columns.str.strip()
+
+    required_cols = [
+        "source_id_mf", "ra", "dec", "mjd",
+        "w1mpro_ep", "w1sigmpro_ep", "w1rchi2_ep",
+        "w2mpro_ep", "w2sigmpro_ep", "w2rchi2_ep",
+        "nb", "na", "moon_masked", "qi_fact", "saa_sep",
+    ]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Required columns absent in {filepath}:\n"
+            f"  Missing : {missing}\n"
+            f"  Found   : {list(df.columns)}\n"
+            "If this is a NEOWISE file, use load_NEOWISE_band() instead."
+        )
+
+    filename  = os.path.basename(filepath)
+    stem      = os.path.splitext(filename)[0]
+    parts     = stem.split("_")
+    galaxy_id = parts[0]
+    survey    = parts[-1]
+
+    source_id_mf = df["source_id_mf"].iloc[0]
+    ra           = df["ra"].iloc[0]
+    dec          = df["dec"].iloc[0]
+
+    if df["source_id_mf"].nunique() > 1:
+        print(
+            f"[Warning] Multiple source_id_mf values found in {filename}. "
+            "This file may contain data for more than one source."
+        )
+
+    print(
+        f"[Info] Read {len(df)} rows from {filename}. "
+        "Apply quality cuts with filter_ALLWISE() before analysis."
+    )
+
+    return {
+        "galaxy_id":    galaxy_id,
+        "survey":       survey,
+        "source_id_mf": source_id_mf,
+        "ra":           ra,
+        "dec":          dec,
+        "MJD":          df["mjd"].to_numpy(dtype=float),
+        "w1mpro_ep":    df["w1mpro_ep"].to_numpy(dtype=float),
+        "w1sigmpro_ep": df["w1sigmpro_ep"].to_numpy(dtype=float),
+        "w1rchi2_ep":   df["w1rchi2_ep"].to_numpy(dtype=float),
+        "w2mpro_ep":    df["w2mpro_ep"].to_numpy(dtype=float),
+        "w2sigmpro_ep": df["w2sigmpro_ep"].to_numpy(dtype=float),
+        "w2rchi2_ep":   df["w2rchi2_ep"].to_numpy(dtype=float),
+        "nb":           df["nb"].to_numpy(dtype=int),
+        "na":           df["na"].to_numpy(dtype=int),
+        "moon_masked":  df["moon_masked"].to_numpy(dtype=int),
+        "qi_fact":      df["qi_fact"].to_numpy(dtype=float),
+        "saa_sep":      df["saa_sep"].to_numpy(dtype=float),
+        "df":           df,
+    }
+
+
+def load_ALLWISE_galaxy(base_dir, galaxy_id):
+    """
+    Load the ALLWISE light curve file for a single galaxy.
+
+    Thin wrapper around load_ALLWISE_band that constructs the expected
+    filename (<galaxy_id>_allwise.csv) from base_dir and galaxy_id.
+
+    Parameters
+    ----------
+    base_dir  : str
+    galaxy_id : str  – e.g. 'NSA10045'
+
+    Returns
+    -------
+    dict  – as returned by load_ALLWISE_band
+    """
+    filename = f"{galaxy_id}_allwise.csv"
+    filepath = os.path.join(base_dir, filename)
+
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(
+            f"No ALLWISE file found for '{galaxy_id}' in {base_dir}.\n"
+            f"Expected: {filepath}"
+        )
+
+    return load_ALLWISE_band(filepath)
+
+
+# =============================================================================
+# Quality filtering  (Aravindan 2024 §2.1 / Seacrest & Satyapal 2020)
+# =============================================================================
+
+def filter_ALLWISE(data):
+    """
+    Apply Aravindan 2024 §2.1 quality cuts to a loaded ALLWISE dictionary.
+
+    Cuts applied simultaneously:
+      1. nb == 1            – single-bead fit; no neighbouring-source contamination
+      2. na == 0            – no active deblending applied to this epoch
+      3. w2mpro_ep < 14.5   – removes Eddington bias (Seacrest & Satyapal 2020)
+      4. moon_masked == 0   – epoch not affected by moon masking
+      5. qi_fact > 0        – quality factor indicates a usable frame
+      6. saa_sep >= 5       – sufficient angular separation from the SAA boundary
+
+    Parameters
+    ----------
+    data : dict  – output of load_ALLWISE_band or load_ALLWISE_galaxy
+
+    Returns
+    -------
+    dict  – new filtered dictionary; original is not modified
+    """
+    nb_mask   = data["nb"]          == 1
+    na_mask   = data["na"]          == 0
+    w2_mask   = data["w2mpro_ep"]   <  14.5
+    moon_mask = data["moon_masked"] == 0
+    qi_mask   = data["qi_fact"]     >  0
+    saa_mask  = data["saa_sep"]     >= 5
+
+    mask = nb_mask & na_mask & w2_mask & moon_mask & qi_mask & saa_mask
+
+    n_before = len(data["MJD"])
+    n_after  = int(mask.sum())
+    print(
+        f"[Info] filter_ALLWISE: {n_after}/{n_before} rows passed all cuts "
+        f"(nb==1, na==0, w2mpro_ep<14.5, moon_masked==0, qi_fact>0, saa_sep≥5)."
+    )
+
+    array_keys = [
+        "MJD",
+        "w1mpro_ep", "w1sigmpro_ep", "w1rchi2_ep",
+        "w2mpro_ep", "w2sigmpro_ep", "w2rchi2_ep",
+        "nb", "na", "moon_masked", "qi_fact", "saa_sep",
+    ]
+
+    filtered = {}
+    for key in data:
+        if key in array_keys:
+            filtered[key] = data[key][mask]
+        else:
+            filtered[key] = data[key]
+
+    filtered["df"] = data["df"][mask].reset_index(drop=True)
+    return filtered
+
+
+# =============================================================================
+# Internal helper
+# =============================================================================
+
+def _bin_by_visit(mjd, values, errors=None, gap_days=10):
+    """
+    Group single-epoch observations into WISE visits and return the
+    visit-mean MJD, unweighted mean magnitude, and standard error of the mean.
+
+    Parameters
+    ----------
+    mjd      : array-like
+    values   : array-like  – magnitudes (or colours)
+    errors   : array-like or None  – per-epoch uncertainties
+    gap_days : float  – gap (days) that marks the start of a new visit
+
+    Returns
+    -------
+    bin_mjd, bin_mean, bin_sem : np.ndarray
+    """
+    mjd    = np.asarray(mjd,    dtype=float)
+    values = np.asarray(values, dtype=float)
+    errors = np.asarray(errors, dtype=float) if errors is not None else None
+
+    order = np.argsort(mjd)
+    mjd_s = mjd[order]
+    val_s = values[order]
+    err_s = errors[order] if errors is not None else None
+
+    labels = np.zeros(len(mjd_s), dtype=int)
+    for i in range(1, len(mjd_s)):
+        labels[i] = labels[i - 1] + int(mjd_s[i] - mjd_s[i - 1] > gap_days)
+
+    bin_mjd, bin_mean, bin_sem = [], [], []
+
+    for lbl in np.unique(labels):
+        sel  = labels == lbl
+        n    = sel.sum()
+        vval = val_s[sel]
+
+        bin_mjd.append(mjd_s[sel].mean())
+        bin_mean.append(vval.mean())
+
+        if n > 1:
+            bin_sem.append(vval.std(ddof=1) / np.sqrt(n))
+        else:
+            bin_sem.append(err_s[sel][0] if err_s is not None else 0.0)
+
+    return np.array(bin_mjd), np.array(bin_mean), np.array(bin_sem)
+
+
+def plot_ALLWISE_light_curve(
+    data,
+    galaxy_id=None,
+    figsize=None,
+    band_styles=None,
+    title=None,
+    invert_yaxis=True,
+    show_grid=True,
+    bin_gap=10,
+    save_path=None,
+):
+    """
+    Plot ALLWISE W1, W2, and W1–W2 light curves as three stacked panels,
+    split into columns by observing window.
+
+    Individual single-epoch measurements appear as small grey '+' markers.
+    Visit-averaged values are overlaid as filled coloured markers with
+    standard-error bars (Aravindan et al. 2024 §2.1).
+
+    Parameters
+    ----------
+    data : dict
+        Output of load_ALLWISE_band, load_ALLWISE_galaxy, or filter_ALLWISE.
+    galaxy_id : str, optional
+        Used in the figure title; inferred from data['galaxy_id'] if omitted.
+    figsize : (float, float), optional
+        Defaults to (4 * n_blocks, 8).
+    band_styles : dict, optional
+        Per-band style overrides.  Keys: 'W1', 'W2', 'W1-W2'.
+        Values: dicts with any subset of {'color', 'marker'}.
+    title : str, optional
+        Custom title.  Defaults to "ALLWISE Light Curve — <galaxy_id>".
+    invert_yaxis : bool
+        Inverts all y-axes so that brighter magnitudes sit higher. Default True.
+    show_grid : bool
+        Light dashed grid on all panels.  Default True.
+    bin_gap : float
+        Day gap separating consecutive WISE visits.  Default 10.
+    save_path : str, optional
+        If given, saves the figure to this path.
+
+    Returns
+    -------
+    fig  : matplotlib.figure.Figure
+    axes : np.ndarray of shape (3, n_blocks)
+    """
+    # ------------------------------------------------------------------
+    # Style setup
+    # ------------------------------------------------------------------
+    styles = {band: dict(props) for band, props in _ALLWISE_BAND_DEFAULTS.items()}
+    if band_styles:
+        for band, overrides in band_styles.items():
+            styles.setdefault(band, {}).update(overrides)
+
+    if galaxy_id is None:
+        galaxy_id = data.get("galaxy_id", "Unknown")
+
+    # ------------------------------------------------------------------
+    # Derived arrays
+    # ------------------------------------------------------------------
+    mjd_offset = int(np.floor(data["MJD"].min()))
+    xlabel = f"MJD \u2212 {mjd_offset}"
+
+    x    = data["MJD"] - mjd_offset
+    w1   = data["w1mpro_ep"]
+    w1e  = data["w1sigmpro_ep"]
+    w2   = data["w2mpro_ep"]
+    w2e  = data["w2sigmpro_ep"]
+    col  = w1 - w2
+    cole = np.hypot(w1e, w2e)
+
+    # Drop rows where either magnitude is NaN/Inf before binning or plotting.
+    # A single NaN propagates through _bin_by_visit (which uses np.mean
+    # internally) and ultimately causes set_ylim to raise ValueError.
+    valid = np.isfinite(w1) & np.isfinite(w2)
+    if not valid.all():
+        n_dropped = int((~valid).sum())
+        print(f"[Warning] Dropping {n_dropped} epoch(s) with NaN/Inf magnitudes.")
+    x, w1, w1e, w2, w2e, col, cole = (
+        arr[valid] for arr in (x, w1, w1e, w2, w2e, col, cole)
+    )
+
+    bx1, bw1, bw1e   = _bin_by_visit(x, w1,  w1e,  gap_days=bin_gap)
+    bx2, bw2, bw2e   = _bin_by_visit(x, w2,  w2e,  gap_days=bin_gap)
+    bxc, bcol, bcole = _bin_by_visit(x, col, cole, gap_days=bin_gap)
+
+    print(
+        f"[Info] plot_ALLWISE_light_curve: {len(x)} single epochs → "
+        f"{len(bx1)} visit bins (bin_gap={bin_gap} days)."
+    )
+
+    # ------------------------------------------------------------------
+    # Detect observing windows (gaps > 100 days between visit bins)
+    # ------------------------------------------------------------------
+    subplot_gap = 100
+
+    block_labels = np.zeros(len(bx1), dtype=int)
+    for i in range(1, len(bx1)):
+        if bx1[i] - bx1[i - 1] > subplot_gap:
+            block_labels[i] = block_labels[i - 1] + 1
+        else:
+            block_labels[i] = block_labels[i - 1]
+
+    n_blocks = int(block_labels.max()) + 1
+    print(
+        f"[Info] Detected {n_blocks} observing window(s) "
+        f"(subplot_gap={subplot_gap} days)."
+    )
+
+    # ------------------------------------------------------------------
+    # Assign block labels to raw epochs so they plot in the right column
+    # ------------------------------------------------------------------
+    order = np.argsort(x)
+    x_sorted = x[order]
+
+    raw_labels_sorted = np.zeros(len(x), dtype=int)
+    for i in range(1, len(x_sorted)):
+        if x_sorted[i] - x_sorted[i - 1] > subplot_gap:
+            raw_labels_sorted[i] = raw_labels_sorted[i - 1] + 1
+        else:
+            raw_labels_sorted[i] = raw_labels_sorted[i - 1]
+
+    raw_block_labels = np.empty(len(x), dtype=int)
+    raw_block_labels[order] = raw_labels_sorted
+
+    # ------------------------------------------------------------------
+    # Figure / axes
+    # ------------------------------------------------------------------
+    if figsize is None:
+        figsize = (4 * n_blocks, 8)
+
+    fig, axes = plt.subplots(
+        3, n_blocks,
+        figsize=figsize,
+        sharey="row",
+        gridspec_kw={"hspace": 0.08, "wspace": 0.18},
+    )
+
+    if n_blocks == 1:
+        axes = axes.reshape(3, 1)
+
+    # ------------------------------------------------------------------
+    # Marker style dictionaries
+    # ------------------------------------------------------------------
+    dot_kw = dict(
+        marker="+", linestyle="none", color="0.65",
+        markersize=4, markeredgewidth=0.7, alpha=0.90, zorder=1,
+    )
+    eb_kw = dict(
+        linestyle="none", markersize=7, capsize=3,
+        elinewidth=1.2, capthick=1.2, alpha=0.90, zorder=3,
+    )
+
+    # ------------------------------------------------------------------
+    # Band loop metadata
+    # ------------------------------------------------------------------
+    bands = [
+        ("W1",    x, w1,  w1e,  bx1, bw1, bw1e),
+        ("W2",    x, w2,  w2e,  bx2, bw2, bw2e),
+        ("W1-W2", x, col, cole, bxc, bcol, bcole),
+    ]
+    ylabels = ["W1 (mag)", "W2 (mag)", "W1 \u2212 W2 (mag)"]
+
+    # ------------------------------------------------------------------
+    # Plot each observing window
+    # ------------------------------------------------------------------
+    for block in range(n_blocks):
+
+        sel_bin = block_labels     == block
+        sel_raw = raw_block_labels == block
+
+        for row, (band, rx, rv, re, bx, bv, be) in enumerate(bands):
+
+            ax     = axes[row, block]
+            color  = styles[band]["color"]
+            marker = styles[band]["marker"]
+
+            # 1. Individual single-epoch measurements
+            ax.plot(rx[sel_raw], rv[sel_raw], **dot_kw)
+
+            # 2. Visit-binned means with standard-error bars
+            ax.errorbar(
+                bx[sel_bin], bv[sel_bin], yerr=be[sel_bin],
+                fmt=marker, color=color, **eb_kw,
+            )
+
+            # Tick style: inward ticks on all four sides
+            ax.tick_params(
+                axis="both", direction="in",
+                top=True, right=True, which="both",
+                labelsize=10,
+            )
+            ax.margins(x=0.12)
+
+            if show_grid:
+                ax.grid(True, alpha=0.18, linestyle="--", linewidth=0.7)
+
+            # Y-axis label on leftmost column only
+            if block == 0:
+                ax.set_ylabel(ylabels[row], fontsize=12)
+
+            # Hide x-tick labels on the top two rows; show on bottom row only
+            if row < 2:
+                ax.tick_params(labelbottom=False)
+            else:
+                ax.set_xlabel(xlabel, fontsize=12)
+
+            # Trim the number of x-ticks to avoid crowding between columns
+            ax.xaxis.set_major_locator(plt.MaxNLocator(nbins=4, prune="both"))
+
+    # ------------------------------------------------------------------
+    # Uniform y-axis limits: overall mean ± 3σ across all finite epochs.
+    # Passing (hi, lo) to set_ylim produces the inverted axis directly,
+    # avoiding the double-inversion bug from using both set_ylim and
+    # invert_yaxis() together.
+    # Using nanmean/nanstd as a belt-and-suspenders guard; the finite
+    # filter above should have already removed all NaN/Inf values.
+    # ------------------------------------------------------------------
+    for row, values in enumerate([w1, w2, col]):
+        finite = values[np.isfinite(values)]
+        if len(finite) == 0:
+            print(f"[Warning] Row {row} has no finite values; skipping y-limits.")
+            continue
+        mean_val = float(np.nanmean(finite))
+        std_val  = float(np.nanstd(finite))
+        lo = mean_val - 3.0 * std_val
+        hi = mean_val + 3.0 * std_val
+
+        for block in range(n_blocks):
+            axes[row, block].set_ylim(
+                (hi, lo) if invert_yaxis else (lo, hi)
+            )
+
+    # ------------------------------------------------------------------
+    # Figure title
+    # ------------------------------------------------------------------
+    fig.suptitle(
+        title or f"ALLWISE Light Curve \u2014 {galaxy_id}",
+        fontsize=13, y=0.91,
+    )
+
+    if save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight", dpi=150)
+        print(f"[Info] Figure saved to {save_path}.")
+
+    return fig, axes
+
+# ALLWISE Data Extraction and Quality Cuts
+
+def load_ALLWISE_band(filepath):
+    """
+    Load a single ALLWISE light curve file into a structured dictionary.
+
+    Both W1 and W2 are recorded simultaneously at each epoch, so a single
+    call to this function returns data for both infrared bands at once.
+    This differs from the ZTF loader, which requires one call per band file.
+
+    Parameters
+    ----------
+    filepath : str
+        Full path to an ALLWISE .csv file.
+
+    Returns
+    -------
+    dict with keys
+    --------------
+    'galaxy_id'       : str          – parsed from the filename prefix
+    'survey'          : str          – always 'allwise'; kept for consistency
+                                       with the NEOWISE data structure
+    'source_id_mf'    : str          – unique WISE source identifier (constant
+                                       across all rows; taken from first row)
+    'ra'              : float        – right ascension of target (degrees, J2000)
+    'dec'             : float        – declination of target (degrees, J2000)
+    'MJD'             : np.ndarray   – Modified Julian Date of each epoch
+    'w1mpro_ep'       : np.ndarray   – W1 (3.4 µm) profile-fit magnitude
+    'w1sigmpro_ep'    : np.ndarray   – W1 magnitude uncertainty (1σ)
+    'w1rchi2_ep'      : np.ndarray   – W1 reduced chi-squared of profile fit
+    'w2mpro_ep'       : np.ndarray   – W2 (4.6 µm) profile-fit magnitude
+    'w2sigmpro_ep'    : np.ndarray   – W2 magnitude uncertainty (1σ)
+    'w2rchi2_ep'      : np.ndarray   – W2 reduced chi-squared of profile fit
+    'nb'              : np.ndarray   – number of PSF components used in fit;
+                                       nb == 1 required (Aravindan 2024 §2.1)
+    'na'              : np.ndarray   – number of deblended active sources;
+                                       na == 0 required (Aravindan 2024 §2.1)
+    'moon_masked'     : np.ndarray   – moon-masking flag (0 = unaffected)
+    'qi_fact'         : np.ndarray   – quality factor (> 0 = usable epoch)
+    'saa_sep'         : np.ndarray   – angular separation from South Atlantic
+                                       Anomaly boundary (degrees; ≥ 5 required)
+    'df'              : pd.DataFrame – full raw dataframe for ad-hoc access
+
+    Raises
+    ------
+    FileNotFoundError
+        If no file exists at the given path.
+    ValueError
+        If any of the required columns are absent from the file.
+    """
+    # --- Validate file existence -------------------------------------------
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"ALLWISE file not found: {filepath}")
+
+    # --- Load CSV ------------------------------------------------------------
+    # Standard comma-separated; strip accidental whitespace from headers.
+    df = pd.read_csv(filepath)
+    df.columns = df.columns.str.strip()
+
+    # --- Confirm all required columns are present ----------------------------
+    # ALLWISE uses the '_ep' (epoch) suffix on magnitude columns; NEOWISE does
+    # not.  Catching this early produces a clearer error than a KeyError later.
+    required_cols = [
+        "source_id_mf",
+        "ra", "dec",
+        "mjd",
+        "w1mpro_ep", "w1sigmpro_ep", "w1rchi2_ep",
+        "w2mpro_ep", "w2sigmpro_ep", "w2rchi2_ep",
+        # Aravindan 2024 §2.1 / Seacrest & Satyapal 2020 cut columns
+        "nb", "na",
+        "moon_masked", "qi_fact", "saa_sep",
+    ]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Required columns absent in {filepath}:\n"
+            f"  Missing : {missing}\n"
+            f"  Found   : {list(df.columns)}\n"
+            "If this is a NEOWISE file, use load_NEOWISE_band() instead."
+        )
+
+    # --- Parse identifiers from filename -------------------------------------
+    # Convention: <GALAXY_ID>_allwise.csv
+    # stem.split("_") → ['NSA10045', 'allwise']
+    filename  = os.path.basename(filepath)
+    stem      = os.path.splitext(filename)[0]
+    parts     = stem.split("_")
+    galaxy_id = parts[0]    # e.g. 'NSA10045'
+    survey    = parts[-1]   # 'allwise'
+
+    # --- Extract scalar positional quantities --------------------------------
+    # ra, dec, and source_id_mf are constant across all rows for a single
+    # source.  Take the first-row value and warn if they unexpectedly vary.
+    source_id_mf = df["source_id_mf"].iloc[0]
+    ra           = df["ra"].iloc[0]
+    dec          = df["dec"].iloc[0]
+
+    if df["source_id_mf"].nunique() > 1:
+        print(
+            f"[Warning] Multiple source_id_mf values found in {filename}. "
+            "This file may contain data for more than one source."
+        )
+
+    print(
+        f"[Info] Read {len(df)} rows from {filename}. "
+        "Apply quality cuts with filter_ALLWISE() before analysis."
+    )
+
+    # --- Build and return the structured dictionary --------------------------
+    return {
+        "galaxy_id":    galaxy_id,
+        "survey":       survey,
+        "source_id_mf": source_id_mf,
+        "ra":           ra,
+        "dec":          dec,
+        # 'MJD' is uppercase to match the ZTF data structure so that any
+        # shared downstream utilities work identically on both datasets.
+        "MJD":          df["mjd"].to_numpy(dtype=float),
+        "w1mpro_ep":    df["w1mpro_ep"].to_numpy(dtype=float),
+        "w1sigmpro_ep": df["w1sigmpro_ep"].to_numpy(dtype=float),
+        "w1rchi2_ep":   df["w1rchi2_ep"].to_numpy(dtype=float),
+        "w2mpro_ep":    df["w2mpro_ep"].to_numpy(dtype=float),
+        "w2sigmpro_ep": df["w2sigmpro_ep"].to_numpy(dtype=float),
+        "w2rchi2_ep":   df["w2rchi2_ep"].to_numpy(dtype=float),
+        # Quality columns for Aravindan 2024 §2.1 cuts; passed to filter_ALLWISE().
+        "nb":           df["nb"].to_numpy(dtype=int),
+        "na":           df["na"].to_numpy(dtype=int),
+        "moon_masked":  df["moon_masked"].to_numpy(dtype=int),
+        "qi_fact":      df["qi_fact"].to_numpy(dtype=float),
+        "saa_sep":      df["saa_sep"].to_numpy(dtype=float),
+        "df":           df,
+    }
+
+
+def load_ALLWISE_galaxy(base_dir, galaxy_id):
+    """
+    Load the ALLWISE light curve file for a single galaxy.
+
+    This is a thin wrapper around load_ALLWISE_band that constructs the
+    expected filename from the base directory and galaxy ID, so callers
+    do not need to build the path themselves.
+
+    Parameters
+    ----------
+    base_dir  : str
+        Directory containing the ALLWISE .csv file.
+    galaxy_id : str
+        Galaxy identifier prefix used in the filename (e.g. 'NSA10045').
+
+    Returns
+    -------
+    dict
+        Data dictionary as returned by load_ALLWISE_band.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the expected file does not exist in base_dir.
+    """
+    filename = f"{galaxy_id}_allwise.csv"
+    filepath = os.path.join(base_dir, filename)
+
+    # Raise a clear error before passing the path to load_ALLWISE_band,
+    # so the message names the specific galaxy that is missing.
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(
+            f"No ALLWISE file found for '{galaxy_id}' in {base_dir}.\n"
+            f"Expected: {filepath}"
+        )
+
+    return load_ALLWISE_band(filepath)
+
+
+def filter_ALLWISE(data):
+    """
+    Apply Aravindan 2024 (Section 2.1) quality cuts to a loaded ALLWISE
+    data dictionary.
+
+    All six cuts are applied simultaneously.  Rows failing *any* cut are
+    removed.  The original dictionary is not modified; a new filtered
+    dictionary is returned.
+
+    Parameters
+    ----------
+    data : dict
+        Output of load_ALLWISE_band or load_ALLWISE_galaxy.
+
+    Returns
+    -------
+    dict
+        New data dictionary of the same structure as the input, with all
+        arrays filtered to the rows that pass every cut.  The 'df' key
+        holds the filtered dataframe.
+
+    Notes
+    -----
+    Cuts applied (Aravindan 2024 §2.1; Seacrest & Satyapal 2020):
+      1. nb == 1          – single-bead fit; no neighbouring-source contamination
+      2. na == 0          – no active deblending applied to this epoch
+      3. w2mpro_ep < 14.5 – removes Eddington bias (Seacrest & Satyapal 2020)
+      4. moon_masked == 0 – epoch not affected by moon masking
+      5. qi_fact > 0      – quality factor indicates a usable frame
+      6. saa_sep >= 5     – sufficient angular separation from the SAA boundary
+    """
+    nb_mask   = data["nb"]          == 1
+    na_mask   = data["na"]          == 0
+    w2_mask   = data["w2mpro_ep"]   <  14.5
+    moon_mask = data["moon_masked"] == 0
+    qi_mask   = data["qi_fact"]     >  0
+    saa_mask  = data["saa_sep"]     >= 5
+
+    mask = nb_mask & na_mask & w2_mask & moon_mask & qi_mask & saa_mask
+
+    n_before = len(data["MJD"])
+    n_after  = mask.sum()
+    print(
+        f"[Info] filter_ALLWISE: {n_after}/{n_before} rows passed all cuts "
+        f"(nb==1, na==0, w2mpro_ep<14.5, moon_masked==0, qi_fact>0, saa_sep≥5)."
+    )
+
+    # --- Apply the mask to every array in the dictionary --------------------
+    array_keys = [
+        "MJD",
+        "w1mpro_ep", "w1sigmpro_ep", "w1rchi2_ep",
+        "w2mpro_ep", "w2sigmpro_ep", "w2rchi2_ep",
+        "nb", "na",
+        "moon_masked", "qi_fact", "saa_sep",
+    ]
+
+    filtered = {}
+    for key in data:
+        if key in array_keys:
+            filtered[key] = data[key][mask]
+        else:
+            # Scalars (galaxy_id, survey, ra, dec, …) are copied unchanged.
+            filtered[key] = data[key]
+
+    # Replace the dataframe with a filtered version for consistency.
+    filtered["df"] = data["df"][mask].reset_index(drop=True)
+
+    return filtered
