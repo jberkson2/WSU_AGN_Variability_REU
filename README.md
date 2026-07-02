@@ -64,7 +64,34 @@ A galaxy is noted as a candidate if, among its optical-IR pairs if the analysis 
 ### 5. Variability-based black hole mass estimates
 $\tau_{\text{DRW}}$ is converted to a mass estimate using Burke et al. (2021)'s scaling relation $M_{\text{BH}} = 10^{7.97} M_\odot (\tau_{\text{DRW}} / \text{100 days})^{2.54}$ (Eqn. 2), computer per band from single-band $\tau_\text{DRW}$ and per galaxy from multi-band $\tau_\text{DRW}$, with only $\tau_\text{DRW}$'s own posterior uncertainty propigated. A per-galaxy single-band estimate is also calculated as the inverse-variance-weighted mean across all available bands. Comparison tables are generated and are available in the currently in-progress publication.
 
+## Repository Contents
 
+| Notebook | Purpose |
+|---|---|
+| `WSU_REU_EzTaoX_OneBand_Batch.ipynb` | Stage 1. Fits independent single‑band DRW models to every available band (ZTF‑g, ZTF‑r, NEOWISE‑W1, NEOWISE‑W2) for all 25 galaxies. Produces per‑band $\tau_\text{DRW}$ and $\sigma_\text{DRW}$ posteriors, diagnostic plots, and a running results CSV. |
+| `WSU_REU_EzTaoX_MultiBand_Batch.ipynb` | Stages 2–4. Fits all 15 pairwise two‑band lag combinations and the joint 3–4‑band model for all 25 galaxies; generates summary heatmaps ( $\tau_\text{DRW}$ and lag) across the full galaxy-pair grid and applies the candidate‑selection criteria to flag "interesting" galaxies for closer inspection. |
+| `WSU_REU_EzTaoX_MultiBand_Interesting.ipynb` | Stage 5 / deep‑dive. For the flagged candidate galaxies: generates lag‑shifted light‑curve overlay plots (optical and IR curves aligned by their fitted lag, for visual inspection) and produces the publication‑formatted LaTeX summary tables, including the black‑hole‑mass comparison table. |
+ 
+All three notebooks share a common structure: imports and a colorblind‑safe plotting palette (Wong 2011), data‑loading/quality‑cut utilities, EzTaoX model‑builder functions, then a batch loop that is resumable (`SKIP_COMPLETED = True`) and crash‑safe (results are written to CSV after every individual fit).
+ 
+```
+.
+├── WSU_REU_EzTaoX_OneBand_Batch.ipynb
+├── WSU_REU_EzTaoX_MultiBand_Batch.ipynb
+├── WSU_REU_EzTaoX_MultiBand_Interesting.ipynb
+└── README.md
+```
+## Outputs
+ 
+Each batch notebook writes a running results CSV after every individual fit (so no progress is ever lost to a crash), plus, per galaxy:
+ 
+- Diagnostic DRW‑fit plots (`.png`) and posterior corner/trace plots (`.pdf`)
+- ArviZ NetCDF posteriors (`.nc`) enables re‑plotting or table regeneration without refitting
+- Per‑galaxy 2×2 (single‑band) or multi‑panel (multiband) summary galleries
+- Sample‑wide summary heatmaps: $\log_{10}(\tau_\text{DRW})$ and interband lag, galaxy-band‑pair
+- `interesting_galaxies.csv`, the candidate‑selection summary table
+- Lag‑shifted light‑curve overlay plots for candidate galaxies
+- Publication‑formatted LaTeX tables (single‑band parameters, pairwise DRW+lag, black‑hole‑mass comparison) 
 
 ## Previous Literature
 [Baldassare+ 2020](https://iopscience.iop.org/article/10.3847/1538-4357/ab8936) investigated optical AGN variability in ~50,000 nearby (z < 0.055) dwarf galaxies, for which 70% are $< 10^{10} M_\odot$ using Palomar Transient Factory (PTF) R-band observations with average baselines of several years. They found that, among dwarf galaxies with AGN-like variability, around 75% have narrow emission lines dominated by star formation. This indicates that optical variability can reveal AGN misclassified by typical diagnostics. Additionally, they found that the measured AGN fraction is strongly baseline-dependent (with no trend with BH mass), where longer baselines increase variability detection fractions. They established a powerful and promising technique to be enhanced by ZTF and LSST.
